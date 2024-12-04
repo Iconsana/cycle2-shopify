@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template_string
 from dotenv import load_dotenv
 import os
 from selenium import webdriver
@@ -8,6 +8,8 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import logging
 from difflib import SequenceMatcher
+import shopify
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Shopify configuration
+shopify.Session.setup(api_key=os.getenv('SHOPIFY_API_KEY'), 
+                     secret=os.getenv('SHOPIFY_API_SECRET'))
 
 class ACDCStockScraper:
     def __init__(self):
@@ -58,8 +64,16 @@ class ACDCStockScraper:
         
         return best_match
 
-    def get_stock_levels(self, product_url):
+    def get_stock_levels(self, product_title):
         """Get stock levels for a specific product"""
+        matching_product = self.find_matching_product(product_title)
+        
+        if not matching_product:
+            logger.warning(f"No matching product found for: {product_title}")
+            return None
+
+        # Get the product URL and navigate to it
+        product_url = matching_product.find_element(By.XPATH, "..").get_attribute("href")
         self.driver.get(product_url)
         
         try:
@@ -73,9 +87,11 @@ class ACDCStockScraper:
                 'status': 'unknown'
             }
             
+            # Check if product is in stock
             in_stock_element = self.driver.find_element(By.CLASS_NAME, "stock-status")
             stock_data['status'] = in_stock_element.text
             
+            # Get branch-specific stock levels
             rows = stock_table.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 cells = row.find_elements(By.TAG_NAME, "td")
@@ -93,54 +109,104 @@ class ACDCStockScraper:
             logger.error(f"Error getting stock levels: {str(e)}")
             return None
 
-    def health_check(self):
-        """Health check method"""
-        try:
-            self.driver.get(self.base_url)
-            return True
-        except Exception as e:
-            logger.error(f"Health check failed: {str(e)}")
-            return False
-
     def close(self):
         """Clean up resources"""
         self.driver.quit()
 
-# API Routes
+def get_shopify_products():
+    """Get all products from Shopify store"""
+    shop_url = os.getenv('SHOPIFY_SHOP_URL')
+    access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+    session = shopify.Session(shop_url, '2024-01', access_token)
+    shopify.ShopifyResource.activate_session(session)
+    
+    try:
+        products = shopify.Product.find()
+        return products
+    finally:
+        shopify.ShopifyResource.clear_session()
 
-# Add this route at the top of your routes section in app.py
+def update_shopify_stock(product_id, stock_quantity):
+    """Update Shopify product stock level"""
+    session = shopify.Session(os.getenv('SHOPIFY_SHOP_URL'), 
+                            '2024-01', 
+                            os.getenv('SHOPIFY_ACCESS_TOKEN'))
+    shopify.ShopifyResource.activate_session(session)
+    
+    try:
+        product = shopify.Product.find(product_id)
+        variant = product.variants[0]  # Assuming single variant
+        variant.inventory_quantity = stock_quantity
+        variant.save()
+        logger.info(f"Updated stock for product {product_id} to {stock_quantity}")
+    except Exception as e:
+        logger.error(f"Error updating Shopify stock: {str(e)}")
+    finally:
+        shopify.ShopifyResource.clear_session()
+
+def sync_stock():
+    """Main function to sync stock levels"""
+    logger.info("Starting stock sync")
+    scraper = ACDCStockScraper()
+    
+    try:
+        # Get all Shopify products
+        shopify_products = get_shopify_products()
+        
+        # For each product
+        for product in shopify_products:
+            try:
+                # Try to find matching ACDC product
+                acdc_stock = scraper.get_stock_levels(product.title)
+                
+                if acdc_stock:
+                    # Calculate total stock from both branches
+                    total_stock = (int(acdc_stock.get('edenvale', 0)) + 
+                                 int(acdc_stock.get('germiston', 0)))
+                    
+                    # Update Shopify stock
+                    update_shopify_stock(product.id, total_stock)
+                    logger.info(f"Updated stock for {product.title}")
+                else:
+                    logger.warning(f"No matching ACDC product found for {product.title}")
+            
+            except Exception as e:
+                logger.error(f"Error processing product {product.title}: {str(e)}")
+                continue
+                
+    except Exception as e:
+        logger.error(f"Sync failed: {str(e)}")
+    finally:
+        scraper.close()
+
+# Initialize scheduler
+scheduler = BackgroundScheduler()
+scheduler.add_job(sync_stock, 'cron', hour=0)  # Run at midnight
+scheduler.start()
+
+# API Routes
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
         "endpoints": {
             "/health": "Check system health",
-            "/check-stock/<product_title>": "Check stock for a specific product"
+            "/trigger-sync": "Manually trigger stock sync",
         }
     })
 
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    scraper = ACDCStockScraper()
-    try:
-        status = scraper.health_check()
-        scraper.close()
-        return jsonify({"status": "healthy" if status else "unhealthy"})
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+    return jsonify({"status": "healthy"})
 
-@app.route('/check-stock/<product_title>')
-def check_stock(product_title):
-    """Endpoint to check stock for a specific product"""
-    scraper = ACDCStockScraper()
+@app.route('/trigger-sync')
+def trigger_sync():
+    """Endpoint to manually trigger stock sync"""
     try:
-        result = scraper.process_product(product_title)
-        scraper.close()
-        return jsonify({"success": result})
+        sync_stock()
+        return jsonify({"status": "sync completed"})
     except Exception as e:
-        logger.error(f"Error checking stock: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
