@@ -107,6 +107,18 @@ class ACDCStockScraper:
         self.driver.quit()
 
 # API Routes
+
+# Add this route at the top of your routes section in app.py
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "endpoints": {
+            "/health": "Check system health",
+            "/check-stock/<product_title>": "Check stock for a specific product"
+        }
+    })
+
 @app.route('/health')
 def health():
     """Health check endpoint"""
