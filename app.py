@@ -21,19 +21,28 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 
-# Shopify configuration
-shop_url = os.getenv('SHOPIFY_SHOP_URL')
+# Shopify configuration with proper URL handling
+shop_url = os.getenv('SHOPIFY_SHOP_URL', '').replace('https://', '').strip()
 api_key = os.getenv('SHOPIFY_API_KEY')
 api_secret = os.getenv('SHOPIFY_API_SECRET')
 access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
-# Ensure shop URL includes https://
-if shop_url and not shop_url.startswith('https://'):
-    shop_url = f'https://{shop_url}'
-
 # Initialize Shopify
 shopify.Session.setup(api_key=api_key, secret=api_secret)
-shopify.ShopifyResource.set_site(f"{shop_url}/admin/api/2024-01")
+
+def get_admin_url():
+    """Get properly formatted admin URL for Shopify API"""
+    return f"https://{shop_url}/admin"
+
+def create_shopify_session():
+    """Create and return a Shopify session"""
+    try:
+        session = shopify.Session(shop_url, '2024-01', access_token)
+        shopify.ShopifyResource.activate_session(session)
+        return session
+    except Exception as e:
+        logger.error(f"Failed to create Shopify session: {str(e)}")
+        raise
 
 class ACDCStockScraper:
     def __init__(self):
@@ -83,7 +92,6 @@ class ACDCStockScraper:
             logger.warning(f"No matching product found for: {product_title}")
             return None
 
-        # Get the product URL and navigate to it
         product_url = matching_product.find_element(By.XPATH, "..").get_attribute("href")
         self.driver.get(product_url)
         
@@ -98,11 +106,9 @@ class ACDCStockScraper:
                 'status': 'unknown'
             }
             
-            # Check if product is in stock
             in_stock_element = self.driver.find_element(By.CLASS_NAME, "stock-status")
             stock_data['status'] = in_stock_element.text
             
-            # Get branch-specific stock levels
             rows = stock_table.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 cells = row.find_elements(By.TAG_NAME, "td")
@@ -131,9 +137,7 @@ def get_shopify_products():
             raise ValueError("Missing Shopify credentials in environment variables")
             
         logger.info(f"Attempting to connect to shop: {shop_url}")
-        
-        session = shopify.Session(shop_url, '2024-01', access_token)
-        shopify.ShopifyResource.activate_session(session)
+        session = create_shopify_session()
         
         # Test connection first
         shop = shopify.Shop.current()
@@ -151,9 +155,7 @@ def get_shopify_products():
 def update_shopify_stock(product_id, stock_quantity):
     """Update Shopify product stock level"""
     try:
-        session = shopify.Session(shop_url, '2024-01', access_token)
-        shopify.ShopifyResource.activate_session(session)
-        
+        session = create_shopify_session()
         product = shopify.Product.find(product_id)
         variant = product.variants[0]  # Assuming single variant
         variant.inventory_quantity = stock_quantity
@@ -227,7 +229,6 @@ def health():
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
-        # Test Shopify connection first
         if not shop_url or not access_token:
             return jsonify({
                 "error": "Missing Shopify credentials",
@@ -236,9 +237,8 @@ def trigger_sync():
             }), 500
 
         try:
-            # Test connection with a simple API call
-            session = shopify.Session(shop_url, '2024-01', access_token)
-            shopify.ShopifyResource.activate_session(session)
+            # Test connection
+            session = create_shopify_session()
             shop = shopify.Shop.current()
             logger.info(f"Successfully connected to shop: {shop.name}")
             shopify.ShopifyResource.clear_session()
@@ -267,7 +267,7 @@ def test_config():
         "shopify_token_set": bool(access_token),
         "shopify_api_key_set": bool(api_key),
         "shopify_secret_set": bool(api_secret),
-        "shopify_url": shop_url if shop_url else None
+        "shopify_url": shop_url
     })
 
 if __name__ == "__main__":
