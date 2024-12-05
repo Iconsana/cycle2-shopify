@@ -1,4 +1,14 @@
-from flask import Flask, jsonify, render_template_string
+# At the top of app.py, update the Shopify configuration
+shop_url = os.getenv('SHOPIFY_SHOP_URL')
+api_key = os.getenv('SHOPIFY_API_KEY')
+api_secret = os.getenv('SHOPIFY_API_SECRET')
+access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+
+# Ensure shop URL includes https://
+if not shop_url.startswith('https://'):
+    shop_url = f'https://{shop_url}'
+
+shopify.ShopifyResource.set_site(f"{shop_url}/admin/api/2024-01")from flask import Flask, jsonify, render_template_string
 from dotenv import load_dotenv
 import os
 from selenium import webdriver
