@@ -224,39 +224,26 @@ def home():
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy"})
-
+    
 @app.route('/trigger-sync')
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
-        if not shop_url or not access_token:
-            return jsonify({
-                "error": "Missing Shopify credentials",
-                "shop_url_exists": bool(shop_url),
-                "access_token_exists": bool(access_token)
-            }), 500
-
-        try:
-            # Test connection
-            session = create_shopify_session()
-            shop = shopify.Shop.current()
-            logger.info(f"Successfully connected to shop: {shop.name}")
-            shopify.ShopifyResource.clear_session()
-        except Exception as e:
-            return jsonify({
-                "error": "Shopify connection failed",
-                "details": str(e)
-            }), 500
-
-        # If we get here, Shopify connection works
+        # Debug info
+        logger.info(f"Shop URL format: {shop_url}")
+        logger.info("Access token length: " + str(len(access_token) if access_token else 0))
+        
+        session = shopify.Session(shop_url, '2024-01', access_token)
+        shop = shopify.Shop.current()  # This is where it's failing
+        
         sync_stock()
         return jsonify({"status": "sync completed"})
     except Exception as e:
-        logger.error(f"Sync failed with error: {str(e)}")
         return jsonify({
-            "error": str(e),
-            "type": type(e).__name__,
-            "details": getattr(e, 'message', str(e))
+            "error": "Shopify connection failed",
+            "url_used": shop_url,
+            "token_length": len(access_token) if access_token else 0,
+            "exact_error": str(e)
         }), 500
 
 @app.route('/test-config')
