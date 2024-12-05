@@ -259,6 +259,16 @@ def trigger_sync():
             "details": getattr(e, 'message', str(e))
         }), 500
 
+@app.route('/test-config')
+def test_config():
+    """Test endpoint to verify configuration"""
+    return jsonify({
+        "shopify_url_set": bool(os.getenv('SHOPIFY_SHOP_URL')),
+        "shopify_token_set": bool(os.getenv('SHOPIFY_ACCESS_TOKEN')),
+        "shopify_api_key_set": bool(os.getenv('SHOPIFY_API_KEY')),
+        "shopify_secret_set": bool(os.getenv('SHOPIFY_API_SECRET'))
+    })
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
