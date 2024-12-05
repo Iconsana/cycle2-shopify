@@ -113,19 +113,30 @@ class ACDCStockScraper:
         """Clean up resources"""
         self.driver.quit()
 
+# Update the get_shopify_products function with better error handling
 def get_shopify_products():
     """Get all products from Shopify store"""
-    shop_url = os.getenv('SHOPIFY_SHOP_URL')
-    access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
-    session = shopify.Session(shop_url, '2024-01', access_token)
-    shopify.ShopifyResource.activate_session(session)
-    
     try:
+        shop_url = os.getenv('SHOPIFY_SHOP_URL')
+        access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+        
+        logger.info(f"Attempting to connect to shop: {shop_url}")
+        
+        if not shop_url or not access_token:
+            raise ValueError("Missing Shopify credentials in environment variables")
+            
+        session = shopify.Session(shop_url, '2024-01', access_token)
+        shopify.ShopifyResource.activate_session(session)
+        
         products = shopify.Product.find()
+        logger.info(f"Successfully connected to Shopify")
         return products
+        
+    except Exception as e:
+        logger.error(f"Shopify connection error: {str(e)}")
+        raise
     finally:
         shopify.ShopifyResource.clear_session()
-
 def update_shopify_stock(product_id, stock_quantity):
     """Update Shopify product stock level"""
     session = shopify.Session(os.getenv('SHOPIFY_SHOP_URL'), 
