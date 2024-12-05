@@ -147,37 +147,47 @@ def update_shopify_stock(product_id, stock_quantity):
 def sync_stock():
     """Main function to sync stock levels"""
     logger.info("Starting stock sync")
-    scraper = ACDCStockScraper()
-    
+    scraper = None
     try:
-        # Get all Shopify products
-        shopify_products = get_shopify_products()
+        # First, test Shopify connection
+        logger.info("Testing Shopify connection...")
+        shop_url = os.getenv('SHOPIFY_SHOP_URL')
+        access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+        session = shopify.Session(shop_url, '2024-01', access_token)
+        shopify.ShopifyResource.activate_session(session)
         
-        # For each product
+        # Initialize scraper
+        logger.info("Initializing web scraper...")
+        scraper = ACDCStockScraper()
+        
+        # Get Shopify products
+        logger.info("Fetching Shopify products...")
+        shopify_products = get_shopify_products()
+        logger.info(f"Found {len(shopify_products)} products in Shopify")
+        
         for product in shopify_products:
+            logger.info(f"Processing product: {product.title}")
             try:
-                # Try to find matching ACDC product
                 acdc_stock = scraper.get_stock_levels(product.title)
-                
                 if acdc_stock:
-                    # Calculate total stock from both branches
+                    logger.info(f"Stock data found: {acdc_stock}")
                     total_stock = (int(acdc_stock.get('edenvale', 0)) + 
                                  int(acdc_stock.get('germiston', 0)))
-                    
-                    # Update Shopify stock
                     update_shopify_stock(product.id, total_stock)
-                    logger.info(f"Updated stock for {product.title}")
                 else:
-                    logger.warning(f"No matching ACDC product found for {product.title}")
-            
+                    logger.warning(f"No stock data found for: {product.title}")
             except Exception as e:
                 logger.error(f"Error processing product {product.title}: {str(e)}")
                 continue
                 
     except Exception as e:
-        logger.error(f"Sync failed: {str(e)}")
+        logger.error(f"Sync failed with error: {str(e)}")
+        raise
     finally:
-        scraper.close()
+        if scraper:
+            scraper.close()
+        shopify.ShopifyResource.clear_session()
+                    
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
