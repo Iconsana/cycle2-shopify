@@ -225,10 +225,39 @@ def health():
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
+        # Test Shopify connection first
+        shop_url = os.getenv('SHOPIFY_SHOP_URL')
+        access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+        
+        if not shop_url or not access_token:
+            return jsonify({
+                "error": "Missing Shopify credentials",
+                "shop_url_exists": bool(shop_url),
+                "access_token_exists": bool(access_token)
+            }), 500
+
+        try:
+            session = shopify.Session(shop_url, '2024-01', access_token)
+            shopify.ShopifyResource.activate_session(session)
+            # Test connection with a simple API call
+            shop = shopify.Shop.current()
+            logger.info(f"Successfully connected to shop: {shop.name}")
+        except Exception as e:
+            return jsonify({
+                "error": "Shopify connection failed",
+                "details": str(e)
+            }), 500
+
+        # If we get here, Shopify connection works
         sync_stock()
         return jsonify({"status": "sync completed"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Sync failed with error: {str(e)}")
+        return jsonify({
+            "error": str(e),
+            "type": type(e).__name__,
+            "details": getattr(e, 'message', str(e))
+        }), 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
