@@ -128,19 +128,30 @@ def get_shopify_products():
     """Get all products from Shopify store"""
     try:
         shop_url = os.getenv('SHOPIFY_SHOP_URL')
+        if not shop_url.startswith('https://'):
+            shop_url = f'https://{shop_url}'
+            
         access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
+        api_version = '2024-01'
         
         logger.info(f"Attempting to connect to shop: {shop_url}")
+        logger.info(f"Using API version: {api_version}")
         
-        if not shop_url or not access_token:
-            raise ValueError("Missing Shopify credentials in environment variables")
-            
-        session = shopify.Session(shop_url, '2024-01', access_token)
+        session = shopify.Session(shop_url, api_version, access_token)
         shopify.ShopifyResource.activate_session(session)
         
+        # Test connection first
+        shop = shopify.Shop.current()
+        logger.info(f"Connected to shop: {shop.name}")
+        
         products = shopify.Product.find()
-        logger.info(f"Successfully connected to Shopify")
         return products
+        
+    except Exception as e:
+        logger.error(f"Shopify connection error: {str(e)}")
+        raise
+    finally:
+        shopify.ShopifyResource.clear_session()
         
     except Exception as e:
         logger.error(f"Shopify connection error: {str(e)}")
