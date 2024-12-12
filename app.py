@@ -23,8 +23,8 @@ app = Flask(__name__)
 
 # Shopify configuration with proper URL handling
 shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
-if not shop_url.startswith('https://'):
-    shop_url = f"https://{shop_url}"
+# Remove https:// if present
+shop_url = shop_url.replace('https://', '').replace('http://', '')
 
 api_key = os.getenv('SHOPIFY_API_KEY')
 api_secret = os.getenv('SHOPIFY_API_SECRET')
