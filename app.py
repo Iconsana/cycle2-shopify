@@ -34,6 +34,7 @@ def initialize_shopify():
     """Initialize Shopify connection with error handling"""
     try:
         shopify.Session.setup(api_key=api_key, secret=api_secret)
+        # Use latest stable API version and clean URL
         session = shopify.Session(shop_url, '2024-01', access_token)
         shopify.ShopifyResource.activate_session(session)
         
@@ -43,6 +44,9 @@ def initialize_shopify():
         return True
     except Exception as e:
         logger.error(f"Shopify initialization failed: {str(e)}")
+        # Add more detailed logging
+        logger.error(f"Shop URL used: {shop_url}")
+        logger.error(f"API Version: 2024-01")
         return False
 
 class ACDCStockScraper:
@@ -231,11 +235,15 @@ def health():
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
+        # Add more detailed logging
+        logger.info(f"Attempting to initialize Shopify with URL: {shop_url}")
+        
         if not initialize_shopify():
             return jsonify({
                 "error": "Failed to initialize Shopify connection",
                 "shop_url": shop_url,
-                "token_status": "Present" if access_token else "Missing"
+                "token_status": "Present" if access_token else "Missing",
+                "url_format": "Domain only (no https://)"
             }), 500
             
         sync_stock()
@@ -243,7 +251,8 @@ def trigger_sync():
     except Exception as e:
         return jsonify({
             "error": "Shopify connection failed",
-            "details": str(e)
+            "details": str(e),
+            "shop_url": shop_url
         }), 500
 
 @app.route('/test-config')
