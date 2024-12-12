@@ -22,27 +22,28 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Shopify configuration with proper URL handling
-shop_url = os.getenv('SHOPIFY_SHOP_URL', '').replace('https://', '').strip()
+shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
+if not shop_url.startswith('https://'):
+    shop_url = f"https://{shop_url}"
+
 api_key = os.getenv('SHOPIFY_API_KEY')
 api_secret = os.getenv('SHOPIFY_API_SECRET')
 access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
-# Initialize Shopify
-shopify.Session.setup(api_key=api_key, secret=api_secret)
-
-def get_admin_url():
-    """Get properly formatted admin URL for Shopify API"""
-    return f"https://{shop_url}/admin"
-
-def create_shopify_session():
-    """Create and return a Shopify session"""
+def initialize_shopify():
+    """Initialize Shopify connection with error handling"""
     try:
+        shopify.Session.setup(api_key=api_key, secret=api_secret)
         session = shopify.Session(shop_url, '2024-01', access_token)
         shopify.ShopifyResource.activate_session(session)
-        return session
+        
+        # Test the connection
+        shop = shopify.Shop.current()
+        logger.info(f"Successfully connected to shop: {shop.name}")
+        return True
     except Exception as e:
-        logger.error(f"Failed to create Shopify session: {str(e)}")
-        raise
+        logger.error(f"Shopify initialization failed: {str(e)}")
+        return False
 
 class ACDCStockScraper:
     def __init__(self):
@@ -137,11 +138,10 @@ def get_shopify_products():
             raise ValueError("Missing Shopify credentials in environment variables")
             
         logger.info(f"Attempting to connect to shop: {shop_url}")
-        session = create_shopify_session()
         
-        # Test connection first
-        shop = shopify.Shop.current()
-        logger.info(f"Connected to shop: {shop.name}")
+        # Initialize Shopify connection
+        if not initialize_shopify():
+            raise Exception("Failed to initialize Shopify connection")
         
         products = shopify.Product.find()
         return products
@@ -155,7 +155,9 @@ def get_shopify_products():
 def update_shopify_stock(product_id, stock_quantity):
     """Update Shopify product stock level"""
     try:
-        session = create_shopify_session()
+        if not initialize_shopify():
+            raise Exception("Failed to initialize Shopify connection")
+            
         product = shopify.Product.find(product_id)
         variant = product.variants[0]  # Assuming single variant
         variant.inventory_quantity = stock_quantity
@@ -229,21 +231,19 @@ def health():
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
-        # Debug info
-        logger.info(f"Shop URL format: {shop_url}")
-        logger.info("Access token length: " + str(len(access_token) if access_token else 0))
-        
-        session = shopify.Session(shop_url, '2024-01', access_token)
-        shop = shopify.Shop.current()  # This is where it's failing
-        
+        if not initialize_shopify():
+            return jsonify({
+                "error": "Failed to initialize Shopify connection",
+                "shop_url": shop_url,
+                "token_status": "Present" if access_token else "Missing"
+            }), 500
+            
         sync_stock()
         return jsonify({"status": "sync completed"})
     except Exception as e:
         return jsonify({
             "error": "Shopify connection failed",
-            "url_used": shop_url,
-            "token_length": len(access_token) if access_token else 0,
-            "exact_error": str(e)
+            "details": str(e)
         }), 500
 
 @app.route('/test-config')
