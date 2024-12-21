@@ -10,6 +10,8 @@ import logging
 from difflib import SequenceMatcher
 import shopify
 from apscheduler.schedulers.background import BackgroundScheduler
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 # Load environment variables
 load_dotenv()
@@ -21,33 +23,122 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 
-# Shopify configuration with proper URL handling
+# Shopify configuration
 shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
-# Remove https:// if present
-shop_url = shop_url.replace('https://', '').replace('http://', '')
-
 api_key = os.getenv('SHOPIFY_API_KEY')
 api_secret = os.getenv('SHOPIFY_API_SECRET')
 access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
-def initialize_shopify():
-    """Initialize Shopify connection with error handling"""
-    try:
-        shopify.Session.setup(api_key=api_key, secret=api_secret)
-        # Use latest stable API version and clean URL
-        session = shopify.Session(shop_url, '2024-01', access_token)
-        shopify.ShopifyResource.activate_session(session)
+# Google Sheets configuration
+SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+CREDENTIALS_FILE = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE')
+
+class GoogleSheetsHandler:
+    def __init__(self, credentials_file, spreadsheet_id):
+        """Initialize the Google Sheets handler with credentials"""
+        self.spreadsheet_id = spreadsheet_id
+        self.SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
         
-        # Test the connection
-        shop = shopify.Shop.current()
-        logger.info(f"Successfully connected to shop: {shop.name}")
-        return True
-    except Exception as e:
-        logger.error(f"Shopify initialization failed: {str(e)}")
-        # Add more detailed logging
-        logger.error(f"Shop URL used: {shop_url}")
-        logger.error(f"API Version: 2024-01")
-        return False
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                credentials_file, scopes=self.SCOPES)
+            self.service = build('sheets', 'v4', credentials=credentials)
+            self.sheet = self.service.spreadsheets()
+            logging.info("Successfully initialized Google Sheets handler")
+        except Exception as e:
+            logging.error(f"Failed to initialize Google Sheets handler: {str(e)}")
+            raise
+
+    def update_stock_levels(self, product_title, acdc_stock, shopify_stock):
+        """Update stock levels for a product"""
+        try:
+            # First, find the row with the matching product title
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='A:A'  # Search in first column
+            ).execute()
+            
+            rows = result.get('values', [])
+            row_number = None
+            
+            for i, row in enumerate(rows):
+                if row and row[0] == product_title:
+                    row_number = i + 1  # Add 1 because sheets are 1-indexed
+                    break
+            
+            if row_number is None:
+                # Product not found, append new row
+                row_number = len(rows) + 1
+                self.sheet.values().append(
+                    spreadsheetId=self.spreadsheet_id,
+                    range='A:F',
+                    valueInputOption='USER_ENTERED',
+                    insertDataOption='INSERT_ROWS',
+                    body={
+                        'values': [[
+                            product_title,
+                            '',  # ACDC Price
+                            '',  # Our Price
+                            acdc_stock,
+                            shopify_stock,
+                            'Check Stock Discrepancy' if acdc_stock != shopify_stock else ''
+                        ]]
+                    }
+                ).execute()
+            else:
+                # Update existing row
+                self.sheet.values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f'D{row_number}:F{row_number}',
+                    valueInputOption='USER_ENTERED',
+                    body={
+                        'values': [[
+                            acdc_stock,
+                            shopify_stock,
+                            'Check Stock Discrepancy' if acdc_stock != shopify_stock else ''
+                        ]]
+                    }
+                ).execute()
+            
+            # Update last updated timestamp
+            self.mark_last_updated(row_number)
+            logging.info(f"Successfully updated stock levels for {product_title}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to update stock levels: {str(e)}")
+            return False
+
+    def get_all_products(self):
+        """Get all products and their stock levels"""
+        try:
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='A2:E'  # Exclude header row
+            ).execute()
+            return result.get('values', [])
+        except Exception as e:
+            logging.error(f"Failed to get products: {str(e)}")
+            return []
+
+    def mark_last_updated(self, row_number):
+        """Update the last updated timestamp for a row"""
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            self.sheet.values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=f'G{row_number}',
+                valueInputOption='USER_ENTERED',
+                body={
+                    'values': [[timestamp]]
+                }
+            ).execute()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to update timestamp: {str(e)}")
+            return False
 
 class ACDCStockScraper:
     def __init__(self):
@@ -135,6 +226,21 @@ class ACDCStockScraper:
         """Clean up resources"""
         self.driver.quit()
 
+def initialize_shopify():
+    """Initialize Shopify connection with error handling"""
+    try:
+        shopify.Session.setup(api_key=api_key, secret=api_secret)
+        session = shopify.Session(shop_url, '2024-01', access_token)
+        shopify.ShopifyResource.activate_session(session)
+        
+        # Test the connection
+        shop = shopify.Shop.current()
+        logger.info(f"Successfully connected to shop: {shop.name}")
+        return True
+    except Exception as e:
+        logger.error(f"Shopify initialization failed: {str(e)}")
+        return False
+
 def get_shopify_products():
     """Get all products from Shopify store"""
     try:
@@ -143,7 +249,6 @@ def get_shopify_products():
             
         logger.info(f"Attempting to connect to shop: {shop_url}")
         
-        # Initialize Shopify connection
         if not initialize_shopify():
             raise Exception("Failed to initialize Shopify connection")
         
@@ -156,29 +261,17 @@ def get_shopify_products():
     finally:
         shopify.ShopifyResource.clear_session()
 
-def update_shopify_stock(product_id, stock_quantity):
-    """Update Shopify product stock level"""
-    try:
-        if not initialize_shopify():
-            raise Exception("Failed to initialize Shopify connection")
-            
-        product = shopify.Product.find(product_id)
-        variant = product.variants[0]  # Assuming single variant
-        variant.inventory_quantity = stock_quantity
-        variant.save()
-        logger.info(f"Updated stock for product {product_id} to {stock_quantity}")
-    except Exception as e:
-        logger.error(f"Error updating Shopify stock: {str(e)}")
-        raise
-    finally:
-        shopify.ShopifyResource.clear_session()
-
 def sync_stock():
     """Main function to sync stock levels"""
     logger.info("Starting stock sync")
     scraper = None
+    sheets_handler = None
+    
     try:
-        # Get Shopify products first
+        # Initialize Google Sheets handler
+        sheets_handler = GoogleSheetsHandler(CREDENTIALS_FILE, SPREADSHEET_ID)
+        
+        # Get Shopify products
         logger.info("Fetching Shopify products...")
         shopify_products = get_shopify_products()
         logger.info(f"Found {len(shopify_products)} products in Shopify")
@@ -190,12 +283,23 @@ def sync_stock():
         for product in shopify_products:
             logger.info(f"Processing product: {product.title}")
             try:
+                # Get ACDC stock levels
                 acdc_stock = scraper.get_stock_levels(product.title)
                 if acdc_stock:
-                    logger.info(f"Stock data found: {acdc_stock}")
-                    total_stock = (int(acdc_stock.get('edenvale', 0)) + 
-                                 int(acdc_stock.get('germiston', 0)))
-                    update_shopify_stock(product.id, total_stock)
+                    total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
+                                      int(acdc_stock.get('germiston', 0)))
+                    
+                    # Get current Shopify stock
+                    shopify_stock = product.variants[0].inventory_quantity
+                    
+                    # Update Google Sheet
+                    sheets_handler.update_stock_levels(
+                        product.title,
+                        total_acdc_stock,
+                        shopify_stock
+                    )
+                    
+                    logger.info(f"Updated sheet for {product.title}")
                 else:
                     logger.warning(f"No stock data found for: {product.title}")
             except Exception as e:
@@ -222,7 +326,7 @@ def home():
         "endpoints": {
             "/health": "Check system health",
             "/trigger-sync": "Manually trigger stock sync",
-            "/test-config": "Test Shopify configuration"
+            "/test-config": "Test configuration"
         }
     })
 
@@ -235,34 +339,29 @@ def health():
 def trigger_sync():
     """Endpoint to manually trigger stock sync"""
     try:
-        # Add more detailed logging
-        logger.info(f"Attempting to initialize Shopify with URL: {shop_url}")
-        
-        if not initialize_shopify():
-            return jsonify({
-                "error": "Failed to initialize Shopify connection",
-                "shop_url": shop_url,
-                "token_status": "Present" if access_token else "Missing",
-                "url_format": "Domain only (no https://)"
-            }), 500
-            
         sync_stock()
         return jsonify({"status": "sync completed"})
     except Exception as e:
         return jsonify({
-            "error": "Shopify connection failed",
-            "details": str(e),
-            "shop_url": shop_url
+            "error": "Sync failed",
+            "details": str(e)
         }), 500
 
 @app.route('/test-config')
 def test_config():
     """Test endpoint to verify configuration"""
+    try:
+        sheets_handler = GoogleSheetsHandler(CREDENTIALS_FILE, SPREADSHEET_ID)
+        sheets_test = sheets_handler.get_all_products() is not None
+    except Exception as e:
+        sheets_test = False
+        
     return jsonify({
         "shopify_url_set": bool(shop_url),
         "shopify_token_set": bool(access_token),
         "shopify_api_key_set": bool(api_key),
         "shopify_secret_set": bool(api_secret),
+        "google_sheets_working": sheets_test,
         "shopify_url": shop_url
     })
 
