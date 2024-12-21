@@ -1,5 +1,4 @@
-from flask import Flask, jsonify, render_template_string
-from dotenv import load_dotenv
+from flask import Flask, jsonify
 import os
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -8,13 +7,9 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import logging
 from difflib import SequenceMatcher
-import shopify
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-
-# Load environment variables
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,12 +17,6 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-
-# Shopify configuration
-shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
-api_key = os.getenv('SHOPIFY_API_KEY')
-api_secret = os.getenv('SHOPIFY_API_SECRET')
-access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
 # Google Sheets configuration
 SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
@@ -49,7 +38,7 @@ class GoogleSheetsHandler:
             logging.error(f"Failed to initialize Google Sheets handler: {str(e)}")
             raise
 
-    def update_stock_levels(self, product_title, acdc_stock, shopify_stock):
+    def update_stock_levels(self, product_title, acdc_stock, current_shopify_stock=0):
         """Update stock levels for a product"""
         try:
             # First, find the row with the matching product title
@@ -80,8 +69,8 @@ class GoogleSheetsHandler:
                             '',  # ACDC Price
                             '',  # Our Price
                             acdc_stock,
-                            shopify_stock,
-                            'Check Stock Discrepancy' if acdc_stock != shopify_stock else ''
+                            current_shopify_stock,
+                            'Check Stock Discrepancy' if str(acdc_stock) != str(current_shopify_stock) else ''
                         ]]
                     }
                 ).execute()
@@ -94,8 +83,8 @@ class GoogleSheetsHandler:
                     body={
                         'values': [[
                             acdc_stock,
-                            shopify_stock,
-                            'Check Stock Discrepancy' if acdc_stock != shopify_stock else ''
+                            current_shopify_stock,
+                            'Check Stock Discrepancy' if str(acdc_stock) != str(current_shopify_stock) else ''
                         ]]
                     }
                 ).execute()
@@ -226,41 +215,6 @@ class ACDCStockScraper:
         """Clean up resources"""
         self.driver.quit()
 
-def initialize_shopify():
-    """Initialize Shopify connection with error handling"""
-    try:
-        shopify.Session.setup(api_key=api_key, secret=api_secret)
-        session = shopify.Session(shop_url, '2024-01', access_token)
-        shopify.ShopifyResource.activate_session(session)
-        
-        # Test the connection
-        shop = shopify.Shop.current()
-        logger.info(f"Successfully connected to shop: {shop.name}")
-        return True
-    except Exception as e:
-        logger.error(f"Shopify initialization failed: {str(e)}")
-        return False
-
-def get_shopify_products():
-    """Get all products from Shopify store"""
-    try:
-        if not shop_url or not access_token:
-            raise ValueError("Missing Shopify credentials in environment variables")
-            
-        logger.info(f"Attempting to connect to shop: {shop_url}")
-        
-        if not initialize_shopify():
-            raise Exception("Failed to initialize Shopify connection")
-        
-        products = shopify.Product.find()
-        return products
-        
-    except Exception as e:
-        logger.error(f"Shopify connection error: {str(e)}")
-        raise
-    finally:
-        shopify.ShopifyResource.clear_session()
-
 def sync_stock():
     """Main function to sync stock levels"""
     logger.info("Starting stock sync")
@@ -271,39 +225,40 @@ def sync_stock():
         # Initialize Google Sheets handler
         sheets_handler = GoogleSheetsHandler(CREDENTIALS_FILE, SPREADSHEET_ID)
         
-        # Get Shopify products
-        logger.info("Fetching Shopify products...")
-        shopify_products = get_shopify_products()
-        logger.info(f"Found {len(shopify_products)} products in Shopify")
-        
         # Initialize scraper
         logger.info("Initializing web scraper...")
         scraper = ACDCStockScraper()
         
-        for product in shopify_products:
-            logger.info(f"Processing product: {product.title}")
+        # Get all products from Google Sheet
+        products = sheets_handler.get_all_products()
+        logger.info(f"Found {len(products)} products in Google Sheet")
+        
+        for product in products:
             try:
+                title = product[0]  # First column is title
+                logger.info(f"Processing product: {title}")
+                
                 # Get ACDC stock levels
-                acdc_stock = scraper.get_stock_levels(product.title)
+                acdc_stock = scraper.get_stock_levels(title)
                 if acdc_stock:
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
                                       int(acdc_stock.get('germiston', 0)))
                     
-                    # Get current Shopify stock
-                    shopify_stock = product.variants[0].inventory_quantity
+                    # Keep existing Shopify stock if available
+                    current_shopify_stock = product[4] if len(product) > 4 else 0
                     
                     # Update Google Sheet
                     sheets_handler.update_stock_levels(
-                        product.title,
+                        title,
                         total_acdc_stock,
-                        shopify_stock
+                        current_shopify_stock
                     )
                     
-                    logger.info(f"Updated sheet for {product.title}")
+                    logger.info(f"Updated sheet for {title}")
                 else:
-                    logger.warning(f"No stock data found for: {product.title}")
+                    logger.warning(f"No stock data found for: {title}")
             except Exception as e:
-                logger.error(f"Error processing product {product.title}: {str(e)}")
+                logger.error(f"Error processing product {title}: {str(e)}")
                 continue
                 
     except Exception as e:
@@ -325,7 +280,7 @@ def home():
         "status": "online",
         "endpoints": {
             "/health": "Check system health",
-            "/trigger-sync": "Manually trigger stock sync",
+            "/trigger-sync": "Manually trigger ACDC stock sync",
             "/test-config": "Test configuration"
         }
     })
@@ -357,12 +312,8 @@ def test_config():
         sheets_test = False
         
     return jsonify({
-        "shopify_url_set": bool(shop_url),
-        "shopify_token_set": bool(access_token),
-        "shopify_api_key_set": bool(api_key),
-        "shopify_secret_set": bool(api_secret),
         "google_sheets_working": sheets_test,
-        "shopify_url": shop_url
+        "scraper_configured": True
     })
 
 if __name__ == "__main__":
