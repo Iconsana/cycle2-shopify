@@ -1,4 +1,5 @@
 from flask import Flask, jsonify
+from dotenv import load_dotenv
 import os
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -6,17 +7,34 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 from difflib import SequenceMatcher
+import shopify
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from datetime import datetime
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+handler = RotatingFileHandler('app.log', maxBytes=10000000, backupCount=5)
+handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+logger.addHandler(handler)
 
 # Initialize Flask app
 app = Flask(__name__)
+
+# Shopify configuration
+shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
+api_key = os.getenv('SHOPIFY_API_KEY')
+api_secret = os.getenv('SHOPIFY_API_SECRET')
+access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
 # Google Sheets configuration
 SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
@@ -28,70 +46,195 @@ class GoogleSheetsHandler:
         self.spreadsheet_id = spreadsheet_id
         self.SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
         
+        # Column mappings
+        self.COLUMN_MAPPINGS = {
+            'handle': 'A',
+            'title': 'B',
+            'option1_name': 'C',
+            'option1_value': 'D',
+            'option2_name': 'E',
+            'option2_value': 'F',
+            'option3_name': 'G',
+            'option3_value': 'H',
+            'sku': 'I',
+            'hs_code': 'J',
+            'coo': 'K',
+            'location': 'L',
+            'incoming': 'M',
+            'unavailable': 'N',
+            'committed': 'O',
+            'available': 'P',
+            'on_hand': 'Q',
+            'acdc_stock': 'R',
+            'stock_difference': 'S',
+            'last_checked': 'T',
+            'action_required': 'U',
+            'notes': 'V'
+        }
+        
         try:
-            credentials = service_account.Credentials.from_service_account_file(
+            self.credentials = service_account.Credentials.from_service_account_file(
                 credentials_file, scopes=self.SCOPES)
-            self.service = build('sheets', 'v4', credentials=credentials)
+            self.service = build('sheets', 'v4', credentials=self.credentials)
             self.sheet = self.service.spreadsheets()
+            self.ensure_sheet_setup()
             logging.info("Successfully initialized Google Sheets handler")
         except Exception as e:
             logging.error(f"Failed to initialize Google Sheets handler: {str(e)}")
             raise
 
-    def update_stock_levels(self, product_title, acdc_stock, current_shopify_stock=0):
-        """Update stock levels for a product"""
+    def ensure_sheet_setup(self):
+        """Ensure sheet is set up with correct headers and formatting"""
+        if not self.check_headers_exist():
+            self.create_header_row()
+            self.format_sheet()
+
+    def check_headers_exist(self):
+        """Check if headers are already set up"""
         try:
-            # First, find the row with the matching product title
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range='A:A'  # Search in first column
+                range='A1:V1'
+            ).execute()
+            return 'values' in result and len(result['values']) > 0
+        except Exception:
+            return False
+
+    def create_header_row(self):
+        """Create the header row with all required columns"""
+        headers = [
+            'Handle', 'Title', 'Option1 Name', 'Option1 Value',
+            'Option2 Name', 'Option2 Value', 'Option3 Name', 'Option3 Value',
+            'SKU', 'HS Code', 'COO', 'Location', 'Incoming', 'Unavailable',
+            'Committed', 'Available', 'On hand',
+            'ACDC Stock', 'Stock Difference', 'Last Checked', 'Action Required', 'Notes'
+        ]
+        
+        try:
+            self.sheet.values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range='A1:V1',
+                valueInputOption='USER_ENTERED',
+                body={'values': [headers]}
+            ).execute()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to create header row: {str(e)}")
+            return False
+
+    def format_sheet(self):
+        """Apply basic formatting to the sheet"""
+        try:
+            requests = [
+                {
+                    'repeatCell': {
+                        'range': {'sheetId': 0, 'startRowIndex': 0, 'endRowIndex': 1},
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9},
+                                'textFormat': {'bold': True}
+                            }
+                        },
+                        'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+                    }
+                },
+                {
+                    'autoResizeDimensions': {
+                        'dimensions': {
+                            'sheetId': 0,
+                            'dimension': 'COLUMNS',
+                            'startIndex': 0,
+                            'endIndex': 22
+                        }
+                    }
+                }
+            ]
+            
+            self.sheet.batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={'requests': requests}
+            ).execute()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to format sheet: {str(e)}")
+            return False
+
+    def update_stock_levels(self, sku, shopify_data, acdc_stock):
+        """Update stock levels and tracking info for a product"""
+        try:
+            # Find row with matching SKU
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f'{self.COLUMN_MAPPINGS["sku"]}:${self.COLUMN_MAPPINGS["sku"]}'
             ).execute()
             
             rows = result.get('values', [])
             row_number = None
             
             for i, row in enumerate(rows):
-                if row and row[0] == product_title:
-                    row_number = i + 1  # Add 1 because sheets are 1-indexed
+                if row and row[0] == sku:
+                    row_number = i + 1
                     break
             
             if row_number is None:
-                # Product not found, append new row
+                # New product
                 row_number = len(rows) + 1
+                shopify_stock = shopify_data.get('on_hand', '0')
+                
+                values = [
+                    [
+                        shopify_data.get('handle', ''),
+                        shopify_data.get('title', ''),
+                        shopify_data.get('option1_name', ''),
+                        shopify_data.get('option1_value', ''),
+                        shopify_data.get('option2_name', ''),
+                        shopify_data.get('option2_value', ''),
+                        shopify_data.get('option3_name', ''),
+                        shopify_data.get('option3_value', ''),
+                        sku,
+                        shopify_data.get('hs_code', ''),
+                        shopify_data.get('coo', ''),
+                        shopify_data.get('location', ''),
+                        shopify_data.get('incoming', '0'),
+                        shopify_data.get('unavailable', '0'),
+                        shopify_data.get('committed', '0'),
+                        shopify_data.get('available', '0'),
+                        shopify_stock,
+                        str(acdc_stock),
+                        'Yes' if int(shopify_stock) != int(acdc_stock) else 'No',
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'Check stock levels' if int(shopify_stock) != int(acdc_stock) else '',
+                        ''
+                    ]
+                ]
+                
                 self.sheet.values().append(
                     spreadsheetId=self.spreadsheet_id,
-                    range='A:F',
+                    range='A:V',
                     valueInputOption='USER_ENTERED',
                     insertDataOption='INSERT_ROWS',
-                    body={
-                        'values': [[
-                            product_title,
-                            '',  # ACDC Price
-                            '',  # Our Price
-                            acdc_stock,
-                            current_shopify_stock,
-                            'Check Stock Discrepancy' if str(acdc_stock) != str(current_shopify_stock) else ''
-                        ]]
-                    }
+                    body={'values': values}
                 ).execute()
             else:
-                # Update existing row
+                # Update existing product
+                shopify_stock = shopify_data.get('on_hand', '0')
+                
                 self.sheet.values().update(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f'D{row_number}:F{row_number}',
+                    range=f'R{row_number}:V{row_number}',
                     valueInputOption='USER_ENTERED',
                     body={
                         'values': [[
-                            acdc_stock,
-                            current_shopify_stock,
-                            'Check Stock Discrepancy' if str(acdc_stock) != str(current_shopify_stock) else ''
+                            str(acdc_stock),
+                            'Yes' if int(shopify_stock) != int(acdc_stock) else 'No',
+                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'Check stock levels' if int(shopify_stock) != int(acdc_stock) else '',
+                            ''
                         ]]
                     }
                 ).execute()
             
-            # Update last updated timestamp
-            self.mark_last_updated(row_number)
-            logging.info(f"Successfully updated stock levels for {product_title}")
+            logging.info(f"Successfully updated stock levels for SKU: {sku}")
             return True
             
         except Exception as e:
@@ -103,31 +246,12 @@ class GoogleSheetsHandler:
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range='A2:E'  # Exclude header row
+                range='A2:V'  # Exclude header row
             ).execute()
             return result.get('values', [])
         except Exception as e:
             logging.error(f"Failed to get products: {str(e)}")
             return []
-
-    def mark_last_updated(self, row_number):
-        """Update the last updated timestamp for a row"""
-        try:
-            from datetime import datetime
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            self.sheet.values().update(
-                spreadsheetId=self.spreadsheet_id,
-                range=f'G{row_number}',
-                valueInputOption='USER_ENTERED',
-                body={
-                    'values': [[timestamp]]
-                }
-            ).execute()
-            return True
-        except Exception as e:
-            logging.error(f"Failed to update timestamp: {str(e)}")
-            return False
 
 class ACDCStockScraper:
     def __init__(self):
@@ -153,8 +277,7 @@ class ACDCStockScraper:
         search_url = f"{self.base_url}/search?q={search_title}"
         self.driver.get(search_url)
         
-        # Wait for products to load
-        time.sleep(2)
+        time.sleep(2)  # Wait for products to load
         
         products = self.driver.find_elements(By.CLASS_NAME, "product-title")
         
@@ -229,13 +352,16 @@ def sync_stock():
         logger.info("Initializing web scraper...")
         scraper = ACDCStockScraper()
         
-        # Get all products from Google Sheet
+        # Get existing products from sheet
         products = sheets_handler.get_all_products()
-        logger.info(f"Found {len(products)} products in Google Sheet")
+        logger.info(f"Found {len(products)} products in sheet")
         
         for product in products:
             try:
-                title = product[0]  # First column is title
+                title = product[1]  # Title is in column B
+                sku = product[8]    # SKU is in column I
+                current_stock = product[16]  # Current stock in column Q
+                
                 logger.info(f"Processing product: {title}")
                 
                 # Get ACDC stock levels
@@ -244,14 +370,17 @@ def sync_stock():
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
                                       int(acdc_stock.get('germiston', 0)))
                     
-                    # Keep existing Shopify stock if available
-                    current_shopify_stock = product[4] if len(product) > 4 else 0
-                    
                     # Update Google Sheet
+                    shopify_data = {
+                        'handle': product[0],
+                        'title': title,
+                        'on_hand': current_stock
+                    }
+                    
                     sheets_handler.update_stock_levels(
-                        title,
-                        total_acdc_stock,
-                        current_shopify_stock
+                        sku,
+                        shopify_data,
+                        total_acdc_stock
                     )
                     
                     logger.info(f"Updated sheet for {title}")
@@ -270,52 +399,4 @@ def sync_stock():
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(sync_stock, 'cron', hour=0)  # Run at midnight
-scheduler.start()
-
-# API Routes
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "online",
-        "endpoints": {
-            "/health": "Check system health",
-            "/trigger-sync": "Manually trigger ACDC stock sync",
-            "/test-config": "Test configuration"
-        }
-    })
-
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({"status": "healthy"})
-    
-@app.route('/trigger-sync')
-def trigger_sync():
-    """Endpoint to manually trigger stock sync"""
-    try:
-        sync_stock()
-        return jsonify({"status": "sync completed"})
-    except Exception as e:
-        return jsonify({
-            "error": "Sync failed",
-            "details": str(e)
-        }), 500
-
-@app.route('/test-config')
-def test_config():
-    """Test endpoint to verify configuration"""
-    try:
-        sheets_handler = GoogleSheetsHandler(CREDENTIALS_FILE, SPREADSHEET_ID)
-        sheets_test = sheets_handler.get_all_products() is not None
-    except Exception as e:
-        sheets_test = False
-        
-    return jsonify({
-        "google_sheets_working": sheets_test,
-        "scraper_configured": True
-    })
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+scheduler.add_job(sync_stock, '
