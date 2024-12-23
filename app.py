@@ -29,17 +29,15 @@ handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(handler)
 
-def get_credentials():
-    """Get Google credentials from environment variable"""
+def get_google_credentials():
     creds_json = os.getenv('GOOGLE_CREDENTIALS')
     if not creds_json:
-        raise ValueError("GOOGLE_CREDENTIALS environment variable not set")
-        
-    temp_creds_path = '/tmp/google_credentials.json'
-    with open(temp_creds_path, 'w') as f:
-        f.write(creds_json)
+        raise ValueError("GOOGLE_CREDENTIALS not set")
     
-    return temp_creds_path
+    return service_account.Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=['https://www.googleapis.com/auth/spreadsheets']
+    )
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -54,19 +52,14 @@ access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
 
 class GoogleSheetsHandler:
-    def __init__(self, credentials_path, spreadsheet_id):
-        """Initialize the Google Sheets handler with credentials"""
+    def __init__(self, spreadsheet_id):
         self.spreadsheet_id = spreadsheet_id
-        self.SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-        
         try:
-            credentials = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=self.SCOPES)
+            credentials = get_google_credentials()
             self.service = build('sheets', 'v4', credentials=credentials)
             self.sheet = self.service.spreadsheets()
-            logging.info("Successfully initialized Google Sheets handler")
         except Exception as e:
-            logging.error(f"Failed to initialize Google Sheets handler: {str(e)}")
+            logger.error(f"Sheets init failed: {str(e)}")
             raise
 
     def update_stock_levels(self, product_title, acdc_stock, shopify_stock):
