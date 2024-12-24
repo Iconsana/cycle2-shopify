@@ -38,13 +38,28 @@ class ACDCStockScraper:
         self.driver = webdriver.Firefox(options=options)
         self.wait = WebDriverWait(self.driver, 10)
 
+    class ACDCStockScraper:
+    def __init__(self):
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--remote-debugging-port=9222')
+        service = webdriver.firefox.service.Service()
+        service.start()
+        self.driver = webdriver.Firefox(options=options, service=service)
+        self.wait = WebDriverWait(self.driver, 10)
+
     def get_stock_levels(self, sku):
         try:
             search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
             self.driver.get(search_url)
-            time.sleep(2)
+            logger.info(f"Searching for SKU: {sku}")
+            time.sleep(5)  # Increased wait time
             
             products = self.wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item")))
+            logger.info(f"Found {len(products)} products")
             
             best_match = self.find_best_match(products, sku)
             if not best_match:
@@ -55,8 +70,9 @@ class ACDCStockScraper:
                 'edenvale': self._get_location_stock(best_match, 'Edenvale'),
                 'germiston': self._get_location_stock(best_match, 'Germiston')
             }
-            
+            logger.info(f"Stock levels for {sku}: {stock}")
             return stock
+            
         except Exception as e:
             logger.error(f"Error getting stock levels for {sku}: {str(e)}")
             return None
