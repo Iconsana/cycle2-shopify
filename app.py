@@ -11,7 +11,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
-import pyppeteer
 
 # Load environment variables
 load_dotenv()
@@ -27,21 +26,23 @@ logger.addHandler(handler)
 
 class ACDCStockScraper:
     async def init(self):
-        self.browser = await pyppeteer.launch({
-            'headless': True,
-            'args': ['--no-sandbox', '--disable-dev-shm-usage']
-        })
-        self.page = await self.browser.newPage()
-        logger.info("Puppeteer initialized")
+        from playwright.async_api import async_playwright
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.firefox.launch(
+            headless=True,
+            args=['--no-sandbox']
+        )
+        self.page = await self.browser.new_page()
+        logger.info("Playwright initialized")
 
     async def get_stock_levels(self, sku):
         try:
             search_url = f"https://www.acdc.co.za/?search={sku}"
             logger.info(f"Accessing URL: {search_url}")
             await self.page.goto(search_url)
-            await self.page.waitForSelector('.product-list-item')
-
-            products = await self.page.querySelectorAll('.product-list-item')
+            await self.page.wait_for_selector('.product-list-item')
+            
+            products = await self.page.query_selector_all('.product-list-item')
             logger.info(f"Found {len(products)} products")
             
             best_match = await self.find_best_match(products, sku)
@@ -62,14 +63,15 @@ class ACDCStockScraper:
 
     async def _get_location_stock(self, product_element, location):
         try:
-            rows = await product_element.querySelectorAll('tr')
+            rows = await product_element.query_selector_all('tr')
             for row in rows:
-                cells = await row.querySelectorAll('th, td')
+                cells = await row.query_selector_all('th, td')
                 for i, cell in enumerate(cells):
-                    cell_text = await cell.evaluate('node => node.textContent')
+                    cell_text = await cell.text_content()
                     if cell_text.strip().lower() == location.lower():
                         try:
-                            stock_value = await cells[i + 1].evaluate('node => node.textContent')
+                            next_cell = cells[i + 1]
+                            stock_value = await next_cell.text_content()
                             return int(''.join(filter(str.isdigit, stock_value)))
                         except:
                             logger.error(f"Error parsing stock value for {location}")
@@ -85,13 +87,14 @@ class ACDCStockScraper:
         
         for product in products:
             try:
-                sku_element = await product.querySelector('.sku')
-                sku = await sku_element.evaluate('node => node.textContent')
-                ratio = SequenceMatcher(None, sku.strip().lower(), target_sku.lower()).ratio()
-                
-                if ratio > highest_ratio and ratio > 0.8:
-                    highest_ratio = ratio
-                    best_match = product
+                sku_element = await product.query_selector('.sku')
+                if sku_element:
+                    sku = await sku_element.text_content()
+                    ratio = SequenceMatcher(None, sku.strip().lower(), target_sku.lower()).ratio()
+                    
+                    if ratio > highest_ratio and ratio > 0.8:
+                        highest_ratio = ratio
+                        best_match = product
             except Exception as e:
                 logger.error(f"Error comparing SKUs: {str(e)}")
                 continue
@@ -101,6 +104,7 @@ class ACDCStockScraper:
     async def close(self):
         try:
             await self.browser.close()
+            await self.playwright.stop()
             logger.info("Browser closed successfully")
         except Exception as e:
             logger.error(f"Error closing browser: {str(e)}")
