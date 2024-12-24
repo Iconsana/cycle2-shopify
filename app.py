@@ -30,22 +30,22 @@ handler.setFormatter(logging.Formatter(
 logger.addHandler(handler)
 
 class ACDCStockScraper:
-   def __init__(self):
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.binary_location = '/usr/bin/firefox'
-    self.driver = webdriver.Firefox(options=options)
-    self.wait = WebDriverWait(self.driver, 10)
+    def __init__(self):
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.binary_location = '/usr/bin/firefox'
+        self.driver = webdriver.Firefox(options=options)
+        self.wait = WebDriverWait(self.driver, 10)
 
     def get_stock_levels(self, sku):
         try:
             search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
             self.driver.get(search_url)
             logger.info(f"Searching for SKU: {sku}")
-            time.sleep(5)  # Increased wait time
+            time.sleep(5)
             
             products = self.wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item")))
             logger.info(f"Found {len(products)} products")
