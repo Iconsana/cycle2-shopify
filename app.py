@@ -61,12 +61,21 @@ class ACDCStockScraper:
             logger.error(f"Error getting stock levels for {product_name}: {str(e)}")
             return None
 
-    def _get_location_stock(self, product_element, location):
-        try:
-            stock_cell = product_element.find_element(By.XPATH, f".//td[contains(text(), '{location}')]/following-sibling::td[1]")
-            return int(''.join(filter(str.isdigit, stock_cell.text)))
-        except:
-            return 0
+   def _get_location_stock(self, product_element, location):
+    try:
+        # Find the row containing the location
+        rows = product_element.find_elements(By.CSS_SELECTOR, "tr")
+        for row in rows:
+            cells = row.find_elements(By.CSS_SELECTOR, "th, td")
+            for i, cell in enumerate(cells):
+                if cell.text.strip().lower() == location.lower():
+                    # Get the next cell which contains the stock number
+                    stock_value = cells[i + 1].text.strip()
+                    return int(''.join(filter(str.isdigit, stock_value)))
+        return 0
+    except Exception as e:
+        logger.error(f"Error getting stock for {location}: {str(e)}")
+        return 0
 
     def find_best_match(self, search_results, target_name):
         best_match = None
