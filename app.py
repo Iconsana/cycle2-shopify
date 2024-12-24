@@ -6,6 +6,9 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver import Chrome
 import time
 import logging
 from logging.handlers import RotatingFileHandler
@@ -14,10 +17,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
-
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.chrome.service import Service
-
 
 # Load environment variables
 load_dotenv()
@@ -39,7 +38,7 @@ class ACDCStockScraper:
         options.add_argument('--disable-dev-shm-usage')
         
         service = Service()
-        self.driver = webdriver.Chrome(service=service, options=options)
+        self.driver = Chrome(service=service, options=options)
         self.wait = WebDriverWait(self.driver, 15)
         logger.info("Chrome driver initialized")
 
