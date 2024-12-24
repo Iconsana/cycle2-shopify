@@ -38,18 +38,17 @@ class ACDCStockScraper:
         self.driver = webdriver.Firefox(options=options)
         self.wait = WebDriverWait(self.driver, 10)
 
-    def get_stock_levels(self, product_name):
+    def get_stock_levels(self, sku):
         try:
-            search_url = f"https://www.acdc.co.za/?search={quote(product_name)}"
+            search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
             self.driver.get(search_url)
             time.sleep(2)
             
-            # Updated selector to match ACDC's product list structure
             products = self.wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item")))
             
-            best_match = self.find_best_match(products, product_name)
+            best_match = self.find_best_match(products, sku)
             if not best_match:
-                logger.warning(f"No matching product found for: {product_name}")
+                logger.warning(f"No matching product found for: {sku}")
                 return None
 
             stock = {
@@ -59,7 +58,7 @@ class ACDCStockScraper:
             
             return stock
         except Exception as e:
-            logger.error(f"Error getting stock levels for {product_name}: {str(e)}")
+            logger.error(f"Error getting stock levels for {sku}: {str(e)}")
             return None
 
     def _get_location_stock(self, product_element, location):
@@ -69,27 +68,32 @@ class ACDCStockScraper:
                 cells = row.find_elements(By.CSS_SELECTOR, "th, td")
                 for i, cell in enumerate(cells):
                     if cell.text.strip().lower() == location.lower():
-                        stock_value = cells[i + 1].text.strip()
-                        return int(''.join(filter(str.isdigit, stock_value)))
+                        try:
+                            stock_value = cells[i + 1].text.strip()
+                            return int(''.join(filter(str.isdigit, stock_value)))
+                        except (IndexError, ValueError):
+                            logger.error(f"Error parsing stock value for {location}")
+                            return 0
             return 0
         except Exception as e:
             logger.error(f"Error getting stock for {location}: {str(e)}")
             return 0
 
-    def find_best_match(self, search_results, target_name):
+    def find_best_match(self, search_results, target_sku):
         best_match = None
         highest_ratio = 0
         
         for result in search_results:
             try:
-                name = result.find_element(By.CSS_SELECTOR, ".product-title").text
-                ratio = SequenceMatcher(None, name.lower(), target_name.lower()).ratio()
+                sku_element = result.find_element(By.CSS_SELECTOR, ".sku")
+                sku = sku_element.text.strip()
+                ratio = SequenceMatcher(None, sku.lower(), target_sku.lower()).ratio()
                 
                 if ratio > highest_ratio and ratio > 0.8:
                     highest_ratio = ratio
                     best_match = result
             except Exception as e:
-                logger.error(f"Error comparing product names: {str(e)}")
+                logger.error(f"Error comparing SKUs: {str(e)}")
                 continue
         
         return best_match
@@ -128,72 +132,56 @@ class GoogleSheetsHandler:
             logger.error(f"Sheets init failed: {str(e)}")
             raise
 
-    def update_stock_levels(self, product_title, acdc_stock, shopify_stock):
+    def get_all_products(self):
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range='A:A'
+                range='Sheet1!E2:E'  # Get SKU column
+            ).execute()
+            return result.get('values', [])
+        except Exception as e:
+            logging.error(f"Failed to get products: {str(e)}")
+            return []
+
+    def update_stock_levels(self, sku, acdc_stock):
+        try:
+            # First find the row with matching SKU
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='Sheet1!E:E'
             ).execute()
             
             rows = result.get('values', [])
             row_number = None
             
             for i, row in enumerate(rows):
-                if row and row[0] == product_title:
+                if row and row[0] == sku:
                     row_number = i + 1
                     break
-            
-            if row_number is None:
-                row_number = len(rows) + 1
-                self.sheet.values().append(
-                    spreadsheetId=self.spreadsheet_id,
-                    range='A:G',
-                    valueInputOption='USER_ENTERED',
-                    insertDataOption='INSERT_ROWS',
-                    body={
-                        'values': [[
-                            product_title,
-                            '',
-                            '',
-                            str(acdc_stock),
-                            str(shopify_stock),
-                            'Yes' if acdc_stock != shopify_stock else 'No',
-                            datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        ]]
-                    }
-                ).execute()
-            else:
+                
+            if row_number:
+                # Update stock values in columns M (Available), N (On hand), and O (timestamp)
                 self.sheet.values().update(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f'D{row_number}:G{row_number}',
+                    range=f'Sheet1!M{row_number}:O{row_number}',
                     valueInputOption='USER_ENTERED',
                     body={
                         'values': [[
-                            str(acdc_stock),
-                            str(shopify_stock),
-                            'Yes' if acdc_stock != shopify_stock else 'No',
-                            datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            str(acdc_stock),  # Available
+                            str(acdc_stock),  # On hand
+                            datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Last updated
                         ]]
                     }
                 ).execute()
-            
-            logging.info(f"Successfully updated stock levels for {product_title}")
-            return True
-            
+                
+                logging.info(f"Successfully updated stock levels for {sku}")
+                return True
+                
+            return False
+                
         except Exception as e:
             logging.error(f"Failed to update stock levels: {str(e)}")
             return False
-
-    def get_all_products(self):
-        try:
-            result = self.sheet.values().get(
-                spreadsheetId=self.spreadsheet_id,
-                range='A2:G'
-            ).execute()
-            return result.get('values', [])
-        except Exception as e:
-            logging.error(f"Failed to get products: {str(e)}")
-            return []
 
 def sync_stock():
     logger.info("Starting stock sync")
@@ -209,25 +197,22 @@ def sync_stock():
         
         for product in products:
             try:
-                title = product[0]
-                acdc_stock = scraper.get_stock_levels(title)
+                sku = product[0]
+                acdc_stock = scraper.get_stock_levels(sku)
                 
                 if acdc_stock:
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
                                       int(acdc_stock.get('germiston', 0)))
                     
-                    current_shopify_stock = int(product[4]) if len(product) > 4 else 0
-                    
                     sheets_handler.update_stock_levels(
-                        title,
-                        total_acdc_stock,
-                        current_shopify_stock
+                        sku,
+                        total_acdc_stock
                     )
-                    logger.info(f"Updated sheet for {title}")
+                    logger.info(f"Updated sheet for {sku}")
                 else:
-                    logger.warning(f"No stock data found for: {title}")
+                    logger.warning(f"No stock data found for: {sku}")
             except Exception as e:
-                logger.error(f"Error processing product {title}: {str(e)}")
+                logger.error(f"Error processing product {sku}: {str(e)}")
                 continue
                 
     except Exception as e:
