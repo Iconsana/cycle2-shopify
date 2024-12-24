@@ -15,7 +15,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
 from selenium.webdriver.firefox.options import Options
-from urllib.parse import quote
 
 # Load environment variables
 load_dotenv()
@@ -32,12 +31,11 @@ logger.addHandler(handler)
 class ACDCStockScraper:
     def __init__(self):
         options = Options()
-        options.add_argument('--headless')
+        options.add_argument('--headless')  # Run in headless mode
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
-        options.add_argument('--remote-debugging-port=9222')
         options.binary_location = '/usr/bin/firefox-esr'
         
         service = webdriver.firefox.service.Service(
@@ -59,14 +57,11 @@ class ACDCStockScraper:
 
     def get_stock_levels(self, sku):
         try:
-            search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
+            search_url = f"https://www.acdc.co.za/?search={sku}"
             logger.info(f"Accessing URL: {search_url}")
             self.driver.get(search_url)
             time.sleep(3)
 
-            logger.info("Page source preview:")
-            logger.info(self.driver.page_source[:500])
-            
             products = self.wait.until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item"))
             )
@@ -86,7 +81,6 @@ class ACDCStockScraper:
             
         except Exception as e:
             logger.error(f"Error getting stock levels for {sku}: {str(e)}")
-            logger.error(f"Page source: {self.driver.page_source}")
             return None
 
     def _get_location_stock(self, product_element, location):
