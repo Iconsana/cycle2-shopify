@@ -44,7 +44,8 @@ class ACDCStockScraper:
             self.driver.get(search_url)
             time.sleep(2)
             
-            products = self.wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "div.product-price-and-shipping")))
+            # Updated selector to match ACDC's product list structure
+            products = self.wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item")))
             
             best_match = self.find_best_match(products, product_name)
             if not best_match:
@@ -97,45 +98,6 @@ class ACDCStockScraper:
         try:
             self.driver.quit()
             logger.info("Browser closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing browser: {str(e)}")
-            
-   def _get_location_stock(self, product_element, location):
-    try:
-        # Find the row containing the location
-        rows = product_element.find_elements(By.CSS_SELECTOR, "tr")
-        for row in rows:
-            cells = row.find_elements(By.CSS_SELECTOR, "th, td")
-            for i, cell in enumerate(cells):
-                if cell.text.strip().lower() == location.lower():
-                    # Get the next cell which contains the stock number
-                    stock_value = cells[i + 1].text.strip()
-                    return int(''.join(filter(str.isdigit, stock_value)))
-        return 0
-    except Exception as e:
-        logger.error(f"Error getting stock for {location}: {str(e)}")
-        return 0
-
-    def find_best_match(self, search_results, target_name):
-        best_match = None
-        highest_ratio = 0
-        
-        for result in search_results:
-            try:
-                name = result.find_element(By.CSS_SELECTOR, ".product-title").text
-                ratio = SequenceMatcher(None, name.lower(), target_name.lower()).ratio()
-                
-                if ratio > highest_ratio and ratio > 0.8:
-                    highest_ratio = ratio
-                    best_match = result
-            except:
-                continue
-        
-        return best_match
-
-    def close(self):
-        try:
-            self.driver.quit()
         except Exception as e:
             logger.error(f"Error closing browser: {str(e)}")
 
@@ -277,7 +239,7 @@ def sync_stock():
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(sync_stock, 'cron', hour=0)
+scheduler.add_job(sync_stock, 'cron', hour=0)  # Run at midnight
 scheduler.start()
 
 @app.route('/')
