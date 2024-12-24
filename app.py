@@ -1,4 +1,3 @@
-```python
 from flask import Flask, jsonify
 from dotenv import load_dotenv
 import os
@@ -11,11 +10,12 @@ import time
 import logging
 from logging.handlers import RotatingFileHandler
 from difflib import SequenceMatcher
-import shopify
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
+from selenium.webdriver.firefox.options import Options
+from urllib.parse import quote
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +29,68 @@ handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(handler)
 
+class ACDCStockScraper:
+    def __init__(self):
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        self.driver = webdriver.Firefox(options=options)
+        self.wait = WebDriverWait(self.driver, 10)
+
+    def get_stock_levels(self, product_name):
+        try:
+            search_url = f"https://www.acdc.co.za/?search={quote(product_name)}"
+            self.driver.get(search_url)
+            time.sleep(2)
+            
+            products = self.wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, "product-list-item")))
+            
+            best_match = self.find_best_match(products, product_name)
+            if not best_match:
+                logger.warning(f"No matching product found for: {product_name}")
+                return None
+
+            stock = {
+                'edenvale': self._get_location_stock(best_match, 'Edenvale'),
+                'germiston': self._get_location_stock(best_match, 'Germiston')
+            }
+            
+            return stock
+        except Exception as e:
+            logger.error(f"Error getting stock levels for {product_name}: {str(e)}")
+            return None
+
+    def _get_location_stock(self, product_element, location):
+        try:
+            stock_cell = product_element.find_element(By.XPATH, f".//td[contains(text(), '{location}')]/following-sibling::td[1]")
+            return int(''.join(filter(str.isdigit, stock_cell.text)))
+        except:
+            return 0
+
+    def find_best_match(self, search_results, target_name):
+        best_match = None
+        highest_ratio = 0
+        
+        for result in search_results:
+            try:
+                name = result.find_element(By.CSS_SELECTOR, ".product-title").text
+                ratio = SequenceMatcher(None, name.lower(), target_name.lower()).ratio()
+                
+                if ratio > highest_ratio and ratio > 0.8:
+                    highest_ratio = ratio
+                    best_match = result
+            except:
+                continue
+        
+        return best_match
+
+    def close(self):
+        try:
+            self.driver.quit()
+        except Exception as e:
+            logger.error(f"Error closing browser: {str(e)}")
+
 def get_google_credentials():
     creds_json = os.getenv('GOOGLE_CREDENTIALS')
     if not creds_json:
@@ -41,12 +103,6 @@ def get_google_credentials():
 
 # Initialize Flask app
 app = Flask(__name__)
-
-# Shopify configuration
-shop_url = os.getenv('SHOPIFY_SHOP_URL', '').strip()
-api_key = os.getenv('SHOPIFY_API_KEY')
-api_secret = os.getenv('SHOPIFY_API_SECRET')
-access_token = os.getenv('SHOPIFY_ACCESS_TOKEN')
 
 # Google Sheets configuration
 SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
@@ -63,7 +119,6 @@ class GoogleSheetsHandler:
             raise
 
     def update_stock_levels(self, product_title, acdc_stock, shopify_stock):
-        """Update stock levels for a product"""
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
@@ -120,7 +175,6 @@ class GoogleSheetsHandler:
             return False
 
     def get_all_products(self):
-        """Get all products and their stock levels"""
         try:
             result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
@@ -131,33 +185,23 @@ class GoogleSheetsHandler:
             logging.error(f"Failed to get products: {str(e)}")
             return []
 
-[Rest of your existing ACDCStockScraper class and other functions remain the same]
-
 def sync_stock():
-    """Main function to sync stock levels"""
     logger.info("Starting stock sync")
     scraper = None
     sheets_handler = None
     
     try:
-        # Initialize Google Sheets handler with credentials from environment
-        credentials_path = get_credentials()
-        sheets_handler = GoogleSheetsHandler(credentials_path, SPREADSHEET_ID)
-        
-        # Initialize scraper
-        logger.info("Initializing web scraper...")
+        sheets_handler = GoogleSheetsHandler(SPREADSHEET_ID)
         scraper = ACDCStockScraper()
         
-        # Get existing products from sheet
         products = sheets_handler.get_all_products()
         logger.info(f"Found {len(products)} products in sheet")
         
         for product in products:
             try:
-                title = product[0]  # Title is in first column
-                
-                # Get ACDC stock levels
+                title = product[0]
                 acdc_stock = scraper.get_stock_levels(title)
+                
                 if acdc_stock:
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
                                       int(acdc_stock.get('germiston', 0)))
@@ -169,7 +213,6 @@ def sync_stock():
                         total_acdc_stock,
                         current_shopify_stock
                     )
-                    
                     logger.info(f"Updated sheet for {title}")
                 else:
                     logger.warning(f"No stock data found for: {title}")
@@ -183,16 +226,12 @@ def sync_stock():
     finally:
         if scraper:
             scraper.close()
-        # Clean up temporary credentials file
-        if os.path.exists('/tmp/google_credentials.json'):
-            os.remove('/tmp/google_credentials.json')
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(sync_stock, 'cron', hour=0)  # Run at midnight
+scheduler.add_job(sync_stock, 'cron', hour=0)
 scheduler.start()
 
-# API Routes
 @app.route('/')
 def home():
     return jsonify({
@@ -206,12 +245,10 @@ def home():
 
 @app.route('/health')
 def health():
-    """Health check endpoint"""
     return jsonify({"status": "healthy"})
     
 @app.route('/trigger-sync')
 def trigger_sync():
-    """Endpoint to manually trigger stock sync"""
     try:
         sync_stock()
         return jsonify({"status": "sync completed"})
@@ -223,16 +260,9 @@ def trigger_sync():
 
 @app.route('/test-config')
 def test_config():
-    """Test endpoint to verify configuration"""
     try:
-        # Test Google Sheets connection
-        credentials_path = get_credentials()
-        sheets_handler = GoogleSheetsHandler(credentials_path, SPREADSHEET_ID)
+        sheets_handler = GoogleSheetsHandler(SPREADSHEET_ID)
         sheets_test = sheets_handler.get_all_products() is not None
-        
-        # Clean up
-        if os.path.exists('/tmp/google_credentials.json'):
-            os.remove('/tmp/google_credentials.json')
             
         return jsonify({
             "google_sheets_working": sheets_test
@@ -246,4 +276,3 @@ def test_config():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-```
