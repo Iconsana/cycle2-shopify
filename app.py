@@ -35,15 +35,6 @@ class ACDCStockScraper:
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        self.driver = webdriver.Firefox(options=options)
-        self.wait = WebDriverWait(self.driver, 10)
-
-    class ACDCStockScraper:
-    def __init__(self):
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--remote-debugging-port=9222')
         service = webdriver.firefox.service.Service()
@@ -72,7 +63,6 @@ class ACDCStockScraper:
             }
             logger.info(f"Stock levels for {sku}: {stock}")
             return stock
-            
         except Exception as e:
             logger.error(f"Error getting stock levels for {sku}: {str(e)}")
             return None
