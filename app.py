@@ -132,52 +132,55 @@ class GoogleSheetsHandler:
             logger.error(f"Sheets init failed: {str(e)}")
             raise
 
-    def get_all_products(self):
-        try:
-            result = self.sheet.values().get(
-                spreadsheetId=self.spreadsheet_id,
-                range='Sheet1!E2:E'  # Get SKU column
-            ).execute()
-            return result.get('values', [])
-        except Exception as e:
-            logging.error(f"Failed to get products: {str(e)}")
-            return []
+  def get_all_products(self):
+    try:
+        result = self.sheet.values().get(
+            spreadsheetId=self.spreadsheet_id,
+            range='Sheet1!I2:I'  # Changed from E to I for SKU column
+        ).execute()
+        return result.get('values', [])
+    except Exception as e:
+        logging.error(f"Failed to get products: {str(e)}")
+        return []
 
-    def update_stock_levels(self, sku, acdc_stock):
-        try:
-            # First find the row with matching SKU
-            result = self.sheet.values().get(
+def update_stock_levels(self, sku, acdc_stock):
+    try:
+        # First find the row with matching SKU
+        result = self.sheet.values().get(
+            spreadsheetId=self.spreadsheet_id,
+            range='Sheet1!I:I'  # Changed from E to I for SKU column
+        ).execute()
+        
+        rows = result.get('values', [])
+        row_number = None
+        
+        for i, row in enumerate(rows):
+            if row and row[0] == sku:
+                row_number = i + 1
+                break
+                
+        if row_number:
+            # Update stock values
+            self.sheet.values().update(
                 spreadsheetId=self.spreadsheet_id,
-                range='Sheet1!E:E'
+                range=f'Sheet1!P{row_number}:Q{row_number}',  # Updated to match Available/On hand columns
+                valueInputOption='USER_ENTERED',
+                body={
+                    'values': [[
+                        str(acdc_stock),  # Available
+                        str(acdc_stock)   # On hand
+                    ]]
+                }
             ).execute()
             
-            rows = result.get('values', [])
-            row_number = None
-            
-            for i, row in enumerate(rows):
-                if row and row[0] == sku:
-                    row_number = i + 1
-                    break
+            logging.info(f"Successfully updated stock levels for {sku}")
+            return True
                 
-            if row_number:
-                # Update stock values in columns M (Available), N (On hand), and O (timestamp)
-                self.sheet.values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f'Sheet1!M{row_number}:O{row_number}',
-                    valueInputOption='USER_ENTERED',
-                    body={
-                        'values': [[
-                            str(acdc_stock),  # Available
-                            str(acdc_stock),  # On hand
-                            datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Last updated
-                        ]]
-                    }
-                ).execute()
+        return False
                 
-                logging.info(f"Successfully updated stock levels for {sku}")
-                return True
-                
-            return False
+    except Exception as e:
+        logging.error(f"Failed to update stock levels: {str(e)}")
+        return False
                 
         except Exception as e:
             logging.error(f"Failed to update stock levels: {str(e)}")
