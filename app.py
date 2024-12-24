@@ -36,18 +36,40 @@ class ACDCStockScraper:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
-        options.binary_location = '/usr/bin/firefox'
-        self.driver = webdriver.Firefox(options=options)
-        self.wait = WebDriverWait(self.driver, 10)
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--remote-debugging-port=9222')
+        options.binary_location = '/usr/bin/firefox-esr'
+        
+        service = webdriver.firefox.service.Service(
+            executable_path='/usr/local/bin/geckodriver',
+            log_path='/tmp/geckodriver.log'
+        )
+        
+        try:
+            self.driver = webdriver.Firefox(
+                options=options,
+                service=service
+            )
+            logger.info("Firefox driver initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Firefox driver: {str(e)}")
+            raise
+            
+        self.wait = WebDriverWait(self.driver, 15)
 
     def get_stock_levels(self, sku):
         try:
             search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
+            logger.info(f"Accessing URL: {search_url}")
             self.driver.get(search_url)
-            logger.info(f"Searching for SKU: {sku}")
-            time.sleep(5)
+            time.sleep(3)
+
+            logger.info("Page source preview:")
+            logger.info(self.driver.page_source[:500])
             
-            products = self.wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item")))
+            products = self.wait.until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-list-item"))
+            )
             logger.info(f"Found {len(products)} products")
             
             best_match = self.find_best_match(products, sku)
@@ -61,8 +83,10 @@ class ACDCStockScraper:
             }
             logger.info(f"Stock levels for {sku}: {stock}")
             return stock
+            
         except Exception as e:
             logger.error(f"Error getting stock levels for {sku}: {str(e)}")
+            logger.error(f"Page source: {self.driver.page_source}")
             return None
 
     def _get_location_stock(self, product_element, location):
