@@ -132,55 +132,49 @@ class GoogleSheetsHandler:
             logger.error(f"Sheets init failed: {str(e)}")
             raise
 
-  def get_all_products(self):
-    try:
-        result = self.sheet.values().get(
-            spreadsheetId=self.spreadsheet_id,
-            range='Sheet1!I2:I'  # Changed from E to I for SKU column
-        ).execute()
-        return result.get('values', [])
-    except Exception as e:
-        logging.error(f"Failed to get products: {str(e)}")
-        return []
-
-def update_stock_levels(self, sku, acdc_stock):
-    try:
-        # First find the row with matching SKU
-        result = self.sheet.values().get(
-            spreadsheetId=self.spreadsheet_id,
-            range='Sheet1!I:I'  # Changed from E to I for SKU column
-        ).execute()
-        
-        rows = result.get('values', [])
-        row_number = None
-        
-        for i, row in enumerate(rows):
-            if row and row[0] == sku:
-                row_number = i + 1
-                break
-                
-        if row_number:
-            # Update stock values
-            self.sheet.values().update(
+    def get_all_products(self):
+        try:
+            result = self.sheet.values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range=f'Sheet1!P{row_number}:Q{row_number}',  # Updated to match Available/On hand columns
-                valueInputOption='USER_ENTERED',
-                body={
-                    'values': [[
-                        str(acdc_stock),  # Available
-                        str(acdc_stock)   # On hand
-                    ]]
-                }
+                range='Sheet1!I2:I'
+            ).execute()
+            return result.get('values', [])
+        except Exception as e:
+            logging.error(f"Failed to get products: {str(e)}")
+            return []
+
+    def update_stock_levels(self, sku, acdc_stock):
+        try:
+            result = self.sheet.values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='Sheet1!I:I'
             ).execute()
             
-            logging.info(f"Successfully updated stock levels for {sku}")
-            return True
+            rows = result.get('values', [])
+            row_number = None
+            
+            for i, row in enumerate(rows):
+                if row and row[0] == sku:
+                    row_number = i + 1
+                    break
                 
-        return False
+            if row_number:
+                self.sheet.values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f'Sheet1!P{row_number}:Q{row_number}',
+                    valueInputOption='USER_ENTERED',
+                    body={
+                        'values': [[
+                            str(acdc_stock),
+                            str(acdc_stock)
+                        ]]
+                    }
+                ).execute()
                 
-    except Exception as e:
-        logging.error(f"Failed to update stock levels: {str(e)}")
-        return False
+                logging.info(f"Successfully updated stock levels for {sku}")
+                return True
+                
+            return False
                 
         except Exception as e:
             logging.error(f"Failed to update stock levels: {str(e)}")
@@ -227,7 +221,7 @@ def sync_stock():
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(sync_stock, 'cron', hour=0)  # Run at midnight
+scheduler.add_job(sync_stock, 'cron', hour=0)
 scheduler.start()
 
 @app.route('/')
