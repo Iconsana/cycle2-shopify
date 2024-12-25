@@ -26,88 +26,6 @@ handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(handler)
 
-class ACDCStockScraper:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-        })
-        logger.info("Session initialized")
-
-    def get_stock_levels(self, sku):
-        try:
-            search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
-            logger.info(f"Accessing URL: {search_url}")
-            
-            response = self.session.get(search_url)
-            response.raise_for_status()
-            logger.info("Got response from ACDC")
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            products = soup.select(".product-list-item")
-            logger.info(f"Found {len(products)} products")
-            
-            best_match = self._find_best_match(products, sku)
-            if not best_match:
-                logger.warning(f"No matching product found for: {sku}")
-                return None
-
-            stock = {
-                'edenvale': self._get_location_stock(best_match, 'Edenvale'),
-                'germiston': self._get_location_stock(best_match, 'Germiston')
-            }
-            logger.info(f"Stock levels for {sku}: {stock}")
-            return stock
-            
-        except Exception as e:
-            logger.error(f"Error getting stock levels for {sku}: {str(e)}")
-            return None
-
-    def _get_location_stock(self, product_element, location):
-        try:
-            rows = product_element.select("tr")
-            for row in rows:
-                cells = row.select("th, td")
-                for i, cell in enumerate(cells):
-                    if cell.text.strip().lower() == location.lower():
-                        try:
-                            stock_value = cells[i + 1].text.strip()
-                            return int(''.join(filter(str.isdigit, stock_value)))
-                        except:
-                            logger.error(f"Error parsing stock value for {location}")
-                            return 0
-            return 0
-        except Exception as e:
-            logger.error(f"Error getting stock for {location}: {str(e)}")
-            return 0
-
-    def _find_best_match(self, products, target_sku):
-        best_match = None
-        highest_ratio = 0
-        
-        for product in products:
-            try:
-                sku_element = product.select_one(".sku")
-                if sku_element:
-                    sku = sku_element.text.strip()
-                    ratio = SequenceMatcher(None, sku.lower(), target_sku.lower()).ratio()
-                    
-                    if ratio > highest_ratio and ratio > 0.8:
-                        highest_ratio = ratio
-                        best_match = product
-            except Exception as e:
-                logger.error(f"Error comparing SKUs: {str(e)}")
-                continue
-        
-        return best_match
-
-    def close(self):
-        self.session.close()
-        logger.info("Session closed")
-
 def get_google_credentials():
     creds_json = os.getenv('GOOGLE_CREDENTIALS')
     if not creds_json:
@@ -183,22 +101,61 @@ class GoogleSheetsHandler:
             logging.error(f"Failed to update stock levels: {str(e)}")
             return False
 
+def get_stock_levels(sku):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
+        response = requests.get(search_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        products = soup.select(".product-list-item")
+        
+        for product in products:
+            # Look for exact SKU match
+            product_sku = product.select_one(".sku")
+            if product_sku and product_sku.text.strip().lower() == sku.lower():
+                stock = {
+                    'edenvale': 0,
+                    'germiston': 0
+                }
+                
+                # Find stock levels
+                for row in product.select("tr"):
+                    location = row.select_one("th")
+                    if location:
+                        loc_text = location.text.strip().lower()
+                        if loc_text in ['edenvale', 'germiston']:
+                            try:
+                                stock_cell = row.select_one("td")
+                                if stock_cell:
+                                    stock_text = stock_cell.text.strip()
+                                    stock[loc_text] = int(''.join(filter(str.isdigit, stock_text)))
+                            except ValueError:
+                                continue
+                
+                return stock
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error getting stock levels for {sku}: {str(e)}")
+        return None
+
 def sync_stock():
     logger.info("Starting stock sync")
-    scraper = None
     sheets_handler = None
     
     try:
         sheets_handler = GoogleSheetsHandler(SPREADSHEET_ID)
-        scraper = ACDCStockScraper()
-        
         products = sheets_handler.get_all_products()
         logger.info(f"Found {len(products)} products in sheet")
         
         for product in products:
             try:
                 sku = product[0]
-                acdc_stock = scraper.get_stock_levels(sku)
+                acdc_stock = get_stock_levels(sku)
                 
                 if acdc_stock:
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
@@ -218,9 +175,6 @@ def sync_stock():
     except Exception as e:
         logger.error(f"Sync failed with error: {str(e)}")
         raise
-    finally:
-        if scraper:
-            scraper.close()
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
