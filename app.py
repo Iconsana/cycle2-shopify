@@ -2,7 +2,8 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 import os
 import json
-import asyncio
+import requests
+from bs4 import BeautifulSoup
 import time
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime
+from urllib.parse import quote
 
 # Load environment variables
 load_dotenv()
@@ -25,34 +27,37 @@ handler.setFormatter(logging.Formatter(
 logger.addHandler(handler)
 
 class ACDCStockScraper:
-    async def init(self):
-        from playwright.async_api import async_playwright
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.firefox.launch(
-            headless=True,
-            args=['--no-sandbox']
-        )
-        self.page = await self.browser.new_page()
-        logger.info("Playwright initialized")
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        })
+        logger.info("Session initialized")
 
-    async def get_stock_levels(self, sku):
+    def get_stock_levels(self, sku):
         try:
-            search_url = f"https://www.acdc.co.za/?search={sku}"
+            search_url = f"https://www.acdc.co.za/?search={quote(sku)}"
             logger.info(f"Accessing URL: {search_url}")
-            await self.page.goto(search_url)
-            await self.page.wait_for_selector('.product-list-item')
             
-            products = await self.page.query_selector_all('.product-list-item')
+            response = self.session.get(search_url)
+            response.raise_for_status()
+            logger.info("Got response from ACDC")
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            products = soup.select(".product-list-item")
             logger.info(f"Found {len(products)} products")
             
-            best_match = await self.find_best_match(products, sku)
+            best_match = self._find_best_match(products, sku)
             if not best_match:
                 logger.warning(f"No matching product found for: {sku}")
                 return None
 
             stock = {
-                'edenvale': await self._get_location_stock(best_match, 'Edenvale'),
-                'germiston': await self._get_location_stock(best_match, 'Germiston')
+                'edenvale': self._get_location_stock(best_match, 'Edenvale'),
+                'germiston': self._get_location_stock(best_match, 'Germiston')
             }
             logger.info(f"Stock levels for {sku}: {stock}")
             return stock
@@ -61,17 +66,15 @@ class ACDCStockScraper:
             logger.error(f"Error getting stock levels for {sku}: {str(e)}")
             return None
 
-    async def _get_location_stock(self, product_element, location):
+    def _get_location_stock(self, product_element, location):
         try:
-            rows = await product_element.query_selector_all('tr')
+            rows = product_element.select("tr")
             for row in rows:
-                cells = await row.query_selector_all('th, td')
+                cells = row.select("th, td")
                 for i, cell in enumerate(cells):
-                    cell_text = await cell.text_content()
-                    if cell_text.strip().lower() == location.lower():
+                    if cell.text.strip().lower() == location.lower():
                         try:
-                            next_cell = cells[i + 1]
-                            stock_value = await next_cell.text_content()
+                            stock_value = cells[i + 1].text.strip()
                             return int(''.join(filter(str.isdigit, stock_value)))
                         except:
                             logger.error(f"Error parsing stock value for {location}")
@@ -81,16 +84,16 @@ class ACDCStockScraper:
             logger.error(f"Error getting stock for {location}: {str(e)}")
             return 0
 
-    async def find_best_match(self, products, target_sku):
+    def _find_best_match(self, products, target_sku):
         best_match = None
         highest_ratio = 0
         
         for product in products:
             try:
-                sku_element = await product.query_selector('.sku')
+                sku_element = product.select_one(".sku")
                 if sku_element:
-                    sku = await sku_element.text_content()
-                    ratio = SequenceMatcher(None, sku.strip().lower(), target_sku.lower()).ratio()
+                    sku = sku_element.text.strip()
+                    ratio = SequenceMatcher(None, sku.lower(), target_sku.lower()).ratio()
                     
                     if ratio > highest_ratio and ratio > 0.8:
                         highest_ratio = ratio
@@ -101,13 +104,9 @@ class ACDCStockScraper:
         
         return best_match
 
-    async def close(self):
-        try:
-            await self.browser.close()
-            await self.playwright.stop()
-            logger.info("Browser closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing browser: {str(e)}")
+    def close(self):
+        self.session.close()
+        logger.info("Session closed")
 
 def get_google_credentials():
     creds_json = os.getenv('GOOGLE_CREDENTIALS')
@@ -184,7 +183,7 @@ class GoogleSheetsHandler:
             logging.error(f"Failed to update stock levels: {str(e)}")
             return False
 
-async def sync_stock():
+def sync_stock():
     logger.info("Starting stock sync")
     scraper = None
     sheets_handler = None
@@ -192,7 +191,6 @@ async def sync_stock():
     try:
         sheets_handler = GoogleSheetsHandler(SPREADSHEET_ID)
         scraper = ACDCStockScraper()
-        await scraper.init()
         
         products = sheets_handler.get_all_products()
         logger.info(f"Found {len(products)} products in sheet")
@@ -200,7 +198,7 @@ async def sync_stock():
         for product in products:
             try:
                 sku = product[0]
-                acdc_stock = await scraper.get_stock_levels(sku)
+                acdc_stock = scraper.get_stock_levels(sku)
                 
                 if acdc_stock:
                     total_acdc_stock = (int(acdc_stock.get('edenvale', 0)) + 
@@ -222,11 +220,11 @@ async def sync_stock():
         raise
     finally:
         if scraper:
-            await scraper.close()
+            scraper.close()
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
-scheduler.add_job(lambda: asyncio.run(sync_stock()), 'cron', hour=0)
+scheduler.add_job(sync_stock, 'cron', hour=0)
 scheduler.start()
 
 @app.route('/')
@@ -247,7 +245,7 @@ def health():
 @app.route('/trigger-sync')
 def trigger_sync():
     try:
-        asyncio.run(sync_stock())
+        sync_stock()
         return jsonify({"status": "sync completed"})
     except Exception as e:
         return jsonify({
